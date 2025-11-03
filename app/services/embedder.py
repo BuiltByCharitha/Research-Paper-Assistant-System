@@ -8,7 +8,7 @@ from services.pdf_loader import extract_text, chunk_text
 # Embedding model
 model = SentenceTransformer("all-MiniLM-L6-v2")
 
-STORAGE_DIR = "storage"
+STORAGE_DIR:str = "storage"
 
 def ensure_storage(paper_id: str):
     paper_dir = os.path.join(STORAGE_DIR, paper_id)
@@ -16,7 +16,7 @@ def ensure_storage(paper_id: str):
     return paper_dir
 
 def create_index_for_paper(paper_id: str, text_chunks):
-    """Create FAISS index + store chunks for a specific paper"""
+    """Create FAISS index + store chunks and metadata for a specific paper"""
     paper_dir = ensure_storage(paper_id)
     dim = 384
     index = faiss.IndexFlatL2(dim)
@@ -30,8 +30,13 @@ def create_index_for_paper(paper_id: str, text_chunks):
     with open(os.path.join(paper_dir, "chunks.json"), "w", encoding="utf-8") as f:
         json.dump(text_chunks, f)
 
-    # Save metadata
-    metadata = {"paper_id": paper_id, "num_chunks": len(text_chunks)}
+    # --- Extract title ---
+    title = text_chunks[0][:200] if text_chunks else "Untitled"
+    metadata = {
+        "paper_id": paper_id,
+        "num_chunks": len(text_chunks),
+        "title": title or "Untitled Paper"
+    }
     with open(os.path.join(paper_dir, "metadata.json"), "w", encoding="utf-8") as f:
         json.dump(metadata, f)
 
@@ -44,3 +49,4 @@ def load_paper_index(paper_id: str):
     with open(os.path.join(paper_dir, "chunks.json"), "r", encoding="utf-8") as f:
         chunks = json.load(f)
     return index, chunks
+

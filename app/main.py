@@ -4,6 +4,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from passlib.context import CryptContext
 from datetime import datetime, timedelta
+from dotenv import load_dotenv
 import os
 import uuid
 import json
@@ -11,8 +12,10 @@ import jwt
 
 from services.pdf_loader import extract_text, chunk_text
 from services.embedder import create_index_for_paper, load_paper_index, STORAGE_DIR
-from services.summarizer import summarize_full_paper, summarize_query, global_query, SUPPORTED_MODELS
+from services.summarizer import summarize_full_paper, summarize_query, SUPPORTED_MODELS
 from services.database import SessionLocal, Base, engine, Paper, User
+from services.globalQuery import global_query
+from services.external_api import fetch_similar_papers
 
 # ---- Create tables ----
 Base.metadata.create_all(bind=engine)
@@ -31,7 +34,9 @@ app.add_middleware(
 )
 
 # ---- JWT & Auth setup ----
-SECRET_KEY = "your-secret-key"  # replace with env variable in production
+load_dotenv()  
+
+SECRET_KEY = os.getenv("SECRET_KEY")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
 
@@ -87,16 +92,16 @@ class QueryRequest(BaseModel):
     paper_id: str
     query: str
     top_k: int = 3
-    model: str = "phi3:mini"
+    model: str = "llama3.2:1b"
 
 class SummarizeRequest(BaseModel):
     paper_id: str
-    model: str = "phi3:mini"
+    model: str = "llama3.2:1b"
 
 class GlobalQueryRequest(BaseModel):
     query: str
     top_k: int = 5
-    model: str = "phi3:mini"
+    model: str = "llama3.2:1b"
     use_papers: bool = True
 
 # ---- Auth endpoints ----
@@ -122,10 +127,11 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
 # ---- Paper Upload ----
 @app.post("/upload-paper/")
 async def upload_paper(
-    file: UploadFile = File(...), 
-    db: Session = Depends(get_db), 
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
-    ):
+):
+    # Generate paper ID and create folder
     paper_id = str(uuid.uuid4())[:8]
     paper_dir = os.path.join(STORAGE_DIR, paper_id)
     os.makedirs(paper_dir, exist_ok=True)
@@ -137,13 +143,24 @@ async def upload_paper(
     text = extract_text(file_path)
     chunks = chunk_text(text)
     metadata = create_index_for_paper(paper_id, chunks)
-    metadata["title"] = file.filename
 
-    paper_entry = Paper(id=paper_id, title=file.filename, user_id=current_user.id)
+    # Create DB entry with proper foreign key
+    paper_entry = Paper(
+        id=paper_id,
+        title=metadata["title"],
+        user_id=current_user.id  # ensures paper is linked to logged-in user
+    )
     db.add(paper_entry)
     db.commit()
+    db.refresh(paper_entry)  
 
-    return {"message": f"Paper '{file.filename}' uploaded successfully!", "paper_id": paper_id}
+    return {
+        "message": f"Paper '{file.filename}' uploaded successfully!",
+        "paper_id": paper_id,
+        "title": metadata["title"],
+        "uploaded_at": paper_entry.uploaded_at
+    }
+
 
 # ---- List Papers ----
 @app.get("/list-papers/")
@@ -152,12 +169,34 @@ def list_papers(db: Session = Depends(get_db), current_user: User = Depends(get_
     papers = [{"id": p.id, "title": p.title} for p in db_papers]
     return {"papers": papers}
 
-# ---- Keyword-based Recommendation ----
-@app.get("/recommend-papers/")
-def recommend_papers(keyword: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    db_papers = db.query(Paper).filter(Paper.user_id == current_user.id).all()
-    papers = [{"id": p.id, "title": p.title} for p in db_papers if keyword.lower() in p.title.lower()]
-    return {"recommended_papers": papers}
+# ---- Similar Paper Recommendation ----
+@app.get("/similar-papers/{paper_id}/")
+def get_similar_papers(paper_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user),
+    limit: int = 5
+):
+    # Fetch the paper from DB for the current user
+    paper = db.query(Paper).filter(
+        Paper.id == paper_id,
+        Paper.user_id == current_user.id
+    ).first()
+
+    if not paper:
+        raise HTTPException(status_code=404, detail="Paper not found")
+    similar_papers = fetch_similar_papers(str(paper.title), limit=limit)
+
+    return {
+        "paper_id": paper_id,
+        "paper_title": paper.title,
+        "similar_papers": similar_papers
+    }
+
+
+# # ---- Keyword-based Recommendation ----
+# @app.get("/recommend-papers/")
+# def recommend_papers(keyword: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+#     db_papers = db.query(Paper).filter(Paper.user_id == current_user.id).all()
+#     papers = [{"id": p.id, "title": p.title} for p in db_papers if keyword.lower() in p.title.lower()]
+#     return {"recommended_papers": papers}
 
 # ---- Summarization & Query Endpoints ----
 @app.post("/summarize-full/")
@@ -173,10 +212,17 @@ def summarize_query_endpoint(req: QueryRequest, current_user: User = Depends(get
     return {"query": req.query, "answer": summarize_query(req.paper_id, req.query, req.top_k, req.model), "model": req.model}
 
 @app.post("/global-query/")
-def global_query_endpoint(req: GlobalQueryRequest, current_user: User = Depends(get_current_user)):
+def global_query_endpoint(req: GlobalQueryRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     return {
         "query": req.query,
-        "answer": global_query(req.query, req.top_k, req.model, req.use_papers),
+        "answer": global_query(
+            query=req.query,
+            current_user=current_user,
+            db=db,
+            k=req.top_k,
+            model=req.model,
+            use_papers=req.use_papers
+        ),
         "model": req.model,
         "used_papers": req.use_papers
     }

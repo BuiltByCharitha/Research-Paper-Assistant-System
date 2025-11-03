@@ -15,6 +15,7 @@ def chunk_text(text, chunk_size=500):
         chunks.append(" ".join(words[i:i+chunk_size]))
     return chunks
 
+
 if __name__ == "__main__":
     sample_pdf = "C:/Users/chari/OneDrive/Documents/Research-Paper-Assistant-System/app/services/paper1.pdf"  
     text = extract_text(sample_pdf)

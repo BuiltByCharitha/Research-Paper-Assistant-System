@@ -42,6 +42,7 @@ export async function askGlobalQuery(query, model, token) {
 }
 
 
+// ---- Centralized protected fetch ----
 const fetchWithAuth = async (url, token, options = {}) => {
   options.headers = {
     ...(options.headers || {}),
@@ -49,9 +50,20 @@ const fetchWithAuth = async (url, token, options = {}) => {
   };
 
   const res = await fetch(`${BASE_URL}${url}`, options);
-  if (!res.ok) throw new Error(await res.text());
+
+  if (!res.ok) {
+    if (res.status === 401) handleUnauthorized();
+    throw new Error(await res.text());
+  }
   return await res.json();
 };
+
+// ---- Helper: handle unauthorized, expired token ----
+function handleUnauthorized() {
+  
+  localStorage.removeItem("token");
+  window.location.href = "/";
+}
 
 // Upload a paper
 export async function uploadPaper(file, token) {
